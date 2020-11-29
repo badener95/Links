@@ -1,8 +1,9 @@
 package de.badener.companion_browser;
 
-import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.DownloadManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -23,12 +24,15 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
 import android.webkit.MimeTypeMap;
 import android.webkit.URLUtil;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
@@ -37,9 +41,9 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatDelegate;
 import androidx.appcompat.widget.PopupMenu;
 import androidx.coordinatorlayout.widget.CoordinatorLayout;
-import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.content.pm.ShortcutInfoCompat;
 import androidx.core.content.pm.ShortcutManagerCompat;
@@ -48,6 +52,7 @@ import androidx.core.graphics.drawable.IconCompat;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.snackbar.Snackbar;
 import com.google.android.material.textfield.TextInputEditText;
+import com.google.android.material.textfield.TextInputLayout;
 
 import java.util.HashMap;
 import java.util.List;
@@ -57,8 +62,6 @@ import java.util.Objects;
 import de.badener.companion_browser.utils.AdBlocking;
 
 public class MainActivity extends AppCompatActivity {
-
-    private static final String startPage = "https://www.google.com/";
 
     private CoordinatorLayout coordinatorLayout;
     private WebView webView;
@@ -73,17 +76,33 @@ public class MainActivity extends AppCompatActivity {
     private SharedPreferences sharedPreferences;
     private SharedPreferences.Editor editor;
 
+    private boolean isDarkWebContentEnabled;
+    private boolean isAdBlockingEnabled;
+    private boolean isDefaultAppAvailable;
+    private boolean isFullScreen;
+
+    private int nightModePreference;
+    private String startPage;
     private String shortcutTitle;
     private IconCompat shortcutIcon;
-
-    private boolean isDefaultAppAvailable;
-    private boolean isAdBlockingEnabled;
-    private boolean isFullScreen;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        sharedPreferences = getPreferences(Context.MODE_PRIVATE);
+        nightModePreference = sharedPreferences.getInt("night_mode", -1);
+        switch (nightModePreference) {
+            case (1):
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_NO);
+                break;
+            case (2):
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
+                break;
+            case (-1):
+                AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM);
+                break;
+        }
         setContentView(R.layout.activity_main);
 
         coordinatorLayout = findViewById(R.id.coordinatorLayout);
@@ -105,10 +124,19 @@ public class MainActivity extends AppCompatActivity {
         webView.getSettings().setLoadWithOverviewMode(true);
         webView.getSettings().setBuiltInZoomControls(true);
         webView.getSettings().setDisplayZoomControls(false);
+        // Enable dark mode for WebView
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            isDarkWebContentEnabled = sharedPreferences.getBoolean("dark_web_content", false);
+            int isLightThemeEnabled = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+            if (isLightThemeEnabled == Configuration.UI_MODE_NIGHT_YES && isDarkWebContentEnabled) {
+                webView.getSettings().setForceDark(WebSettings.FORCE_DARK_ON);
+            } else {
+                webView.getSettings().setForceDark(WebSettings.FORCE_DARK_OFF);
+            }
+        }
 
         // Initialize ad blocking
         AdBlocking.init(this);
-        sharedPreferences = getPreferences(Context.MODE_PRIVATE);
         isAdBlockingEnabled = sharedPreferences.getBoolean("ad_blocking", true);
 
         // Handle "WebView control button" in the search field
@@ -171,6 +199,18 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // Copy URL to clipboard on long click on the search field
+        searchTextInput.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override
+            public boolean onLongClick(View view) {
+                ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = ClipData.newPlainText("URL", webView.getUrl());
+                clipboard.setPrimaryClip(clip);
+                Snackbar.make(coordinatorLayout, R.string.url_copied, Snackbar.LENGTH_SHORT).show();
+                return true;
+            }
+        });
+
         // Handle "clear search text button" in the search field
         clearSearchTextButton.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -192,26 +232,20 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onDownloadStart(String url, String userAgent, String contentDisposition,
                                         String mimetype, long contentLength) {
-                // Check if storage permission is granted and start download if applicable
-                if (isStoragePermissionGranted()) {
-                    DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                        request.allowScanningByMediaScanner();
-                    }
-                    request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-                    String fileName = URLUtil.guessFileName(url, contentDisposition, mimetype);
-                    request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
-                    request.setMimeType(MimeTypeMap.getSingleton().
-                            getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(url)));
-                    DownloadManager downloadManager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
-                    Objects.requireNonNull(downloadManager).enqueue(request);
-                    Snackbar.make(coordinatorLayout, R.string.download_started, Snackbar.LENGTH_SHORT)
-                            .show();
-                }
+                DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+                request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                String fileName = URLUtil.guessFileName(url, contentDisposition, mimetype);
+                request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+                request.setMimeType(MimeTypeMap.getSingleton().
+                        getMimeTypeFromExtension(MimeTypeMap.getFileExtensionFromUrl(url)));
+                DownloadManager downloadManager = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+                Objects.requireNonNull(downloadManager).enqueue(request);
+                Snackbar.make(coordinatorLayout, R.string.download_started, Snackbar.LENGTH_SHORT).show();
             }
         });
 
         // Handle intents
+        startPage = sharedPreferences.getString("start_page", "https://www.google.com/");
         Intent intent = getIntent();
         Uri uri = intent.getData();
         String url;
@@ -224,11 +258,7 @@ public class MainActivity extends AppCompatActivity {
             // Update the progress bar and other ui elements according to WebView progress
             @Override
             public void onProgressChanged(WebView view, int newProgress) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    progressBar.setProgress(newProgress, true);
-                } else {
-                    progressBar.setProgress(newProgress);
-                }
+                progressBar.setProgress(newProgress, true);
                 if (newProgress < 100) {
                     progressBar.setVisibility(View.VISIBLE);
                     webViewControlButton.setImageDrawable(ContextCompat.getDrawable(MainActivity.this, R.drawable.ic_cancel));
@@ -259,14 +289,9 @@ public class MainActivity extends AppCompatActivity {
                 int isLightThemeEnabled = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
                 if (isLightThemeEnabled == Configuration.UI_MODE_NIGHT_NO) {
                     // Light theme is enabled, restore light status bar and nav bar
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        View decorView = getWindow().getDecorView();
-                        decorView.setSystemUiVisibility(
-                                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
-                                        | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-                    } else {
-                        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
-                    }
+                    View decorView = getWindow().getDecorView();
+                    decorView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR |
+                            View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
                 }
                 isFullScreen = false;
             }
@@ -324,7 +349,7 @@ public class MainActivity extends AppCompatActivity {
 
     // Show and handle the popup menu
     private void showPopupMenu() {
-        PopupMenu popupMenu = new PopupMenu(this, menuButton);
+        final PopupMenu popupMenu = new PopupMenu(this, menuButton);
         popupMenu.inflate(R.menu.menu_main);
         checkDefaultApps();
         popupMenu.getMenu().findItem(R.id.action_open_with_app).setEnabled(isDefaultAppAvailable);
@@ -332,78 +357,127 @@ public class MainActivity extends AppCompatActivity {
         popupMenu.setOnMenuItemClickListener(new PopupMenu.OnMenuItemClickListener() {
             @Override
             public boolean onMenuItemClick(MenuItem item) {
-                switch (item.getItemId()) {
+                int itemId = item.getItemId();
 
-                    case R.id.action_share:
-                        // Share URL
-                        Intent shareIntent = new Intent(Intent.ACTION_SEND);
-                        shareIntent.setType("text/plain");
-                        shareIntent.putExtra(Intent.EXTRA_TEXT, webView.getUrl());
-                        startActivity(Intent.createChooser(shareIntent, getString(R.string.chooser_share)));
-                        return true;
+                if (itemId == R.id.action_share) { // Share URL
+                    Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                    shareIntent.setType("text/plain");
+                    shareIntent.putExtra(Intent.EXTRA_TEXT, webView.getUrl());
+                    startActivity(Intent.createChooser(shareIntent, getString(R.string.chooser_share)));
+                    return true;
 
-                    case R.id.action_new_window:
-                        // Open new window
-                        Intent newWindowIntent = new Intent(MainActivity.this, MainActivity.class);
-                        newWindowIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
-                        startActivity(newWindowIntent);
-                        return true;
+                } else if (itemId == R.id.action_new_window) { // Open new window
+                    Intent newWindowIntent = new Intent(MainActivity.this, MainActivity.class);
+                    newWindowIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+                    startActivity(newWindowIntent);
+                    return true;
 
-                    case R.id.action_open_with_app:
-                        // Open current link in default app
-                        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(webView.getUrl()));
-                        startActivity(Intent.createChooser(intent, getString(R.string.chooser_open_app)));
-                        return true;
+                } else if (itemId == R.id.action_open_with_app) { // Open current link in default app
+                    Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(webView.getUrl()));
+                    startActivity(Intent.createChooser(intent, getString(R.string.chooser_open_app)));
+                    return true;
 
-                    case R.id.action_add_shortcut:
-                        // Pin website shortcut to launcher if supported
-                        if (ShortcutManagerCompat.isRequestPinShortcutSupported(MainActivity.this)) {
-                            pinShortcut();
-                        } else {
-                            Snackbar.make(coordinatorLayout, R.string.shortcuts_not_supported, Snackbar.LENGTH_SHORT)
-                                    .show();
-                        }
-                        return true;
+                } else if (itemId == R.id.action_toggle_ad_blocking) { // Toggle ad blocking
+                    isAdBlockingEnabled = !isAdBlockingEnabled;
+                    editor = sharedPreferences.edit();
+                    editor.putBoolean("ad_blocking", isAdBlockingEnabled);
+                    editor.apply();
+                    Snackbar.make(coordinatorLayout, (isAdBlockingEnabled ? R.string.ad_blocking_enabled : R.string.ad_blocking_disabled),
+                            Snackbar.LENGTH_SHORT)
+                            .show();
+                    item.setChecked(isAdBlockingEnabled);
+                    webView.reload();
+                    return true;
 
-                    case R.id.action_toggle_ad_blocking:
-                        // Toggle ad blocking
-                        isAdBlockingEnabled = !isAdBlockingEnabled;
-                        editor = sharedPreferences.edit();
-                        editor.putBoolean("ad_blocking", isAdBlockingEnabled);
-                        editor.apply();
-                        Snackbar.make(coordinatorLayout, (isAdBlockingEnabled ? R.string.ad_blocking_enabled : R.string.ad_blocking_disabled),
-                                Snackbar.LENGTH_SHORT)
+                } else if (itemId == R.id.action_add_shortcut) { // Pin website shortcut to launcher if supported
+                    if (ShortcutManagerCompat.isRequestPinShortcutSupported(MainActivity.this)) {
+                        pinShortcut();
+                    } else {
+                        Snackbar.make(coordinatorLayout, R.string.shortcuts_not_supported, Snackbar.LENGTH_SHORT)
                                 .show();
-                        item.setChecked(isAdBlockingEnabled);
-                        webView.reload();
-                        return true;
+                    }
+                    return true;
 
-                    case R.id.action_close_window:
-                        // Close window
-                        finishAndRemoveTask();
-                        return true;
+                } else if (itemId == R.id.action_set_night_mode) { // Set night mode preference
+                    switch (nightModePreference) {
+                        case (1):
+                            popupMenu.getMenu().findItem(R.id.action_night_mode_off).setChecked(true);
+                            break;
+                        case (2):
+                            popupMenu.getMenu().findItem(R.id.action_night_mode_on).setChecked(true);
+                            break;
+                        case (-1):
+                            popupMenu.getMenu().findItem(R.id.action_night_mode_auto).setChecked(true);
+                            break;
+                    }
+                    popupMenu.getMenu().findItem(R.id.action_enabled_dark_web_content).setChecked(isDarkWebContentEnabled);
+                    return true;
+                } else if (itemId == R.id.action_night_mode_off) {
+                    nightModePreference = 1;
+                    setNightModePreference();
+                    return true;
+                } else if (itemId == R.id.action_night_mode_on) {
+                    nightModePreference = 2;
+                    setNightModePreference();
+                    return true;
+                } else if (itemId == R.id.action_night_mode_auto) {
+                    nightModePreference = -1;
+                    setNightModePreference();
+                    return true;
+                } else if (itemId == R.id.action_enabled_dark_web_content) {
+                    isDarkWebContentEnabled = !isDarkWebContentEnabled;
+                    editor = sharedPreferences.edit();
+                    editor.putBoolean("dark_web_content", isDarkWebContentEnabled);
+                    editor.apply();
+                    recreate();
+                    return true;
 
-                    default:
-                        return false;
+                } else if (itemId == R.id.action_set_start_page) { // Set custom start page
+                    setStartPage();
+                    return true;
+
+                } else if (itemId == R.id.action_clear_data) { // Clear browsing data
+                    clearBrowsingData();
+                    return true;
+
+                } else if (itemId == R.id.action_close_window) { // Close window
+                    finishAndRemoveTask();
+                    return true;
                 }
+                return false;
             }
         });
         popupMenu.show();
+    }
+
+    // Check if there is a default app to open the current link
+    private void checkDefaultApps() {
+        String packageName = "de.badener.companion_browser";
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(webView.getUrl()));
+        PackageManager packageManager = getPackageManager();
+        List<ResolveInfo> list = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+        for (ResolveInfo info : list) {
+            packageName = info.activityInfo.packageName;
+        }
+        isDefaultAppAvailable = !packageName.equals("de.badener.companion_browser");
     }
 
     // Pin website shortcut to launcher
     private void pinShortcut() {
         // Ask for the shortcut title first
         MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this);
+        builder.setIcon(R.drawable.ic_view_grid_plus_outline);
         builder.setTitle(R.string.action_add_shortcut);
-        View viewInflated = LayoutInflater.from(this).inflate(R.layout.add_shortcut_layout, null);
-        final TextInputEditText textInput = viewInflated.findViewById(R.id.TextInput);
+        View viewInflated = LayoutInflater.from(this).inflate(R.layout.alert_dialog_text_input_layout, null);
+        final TextInputLayout textInputLayout = viewInflated.findViewById(R.id.alertDialogTextInputLayout);
+        textInputLayout.setHint(getString(R.string.add_shortcut_input_hint));
+        final TextInputEditText textInput = viewInflated.findViewById(R.id.alertDialogTextInput);
         textInput.setText(webView.getTitle());
         builder.setView(viewInflated);
 
+        // Get the title for the shortcut
         builder.setPositiveButton(R.string.add, new DialogInterface.OnClickListener() {
             public void onClick(DialogInterface dialogInterface, int i) {
-                // Get the title for the shortcut
                 shortcutTitle = (Objects.requireNonNull(textInput.getText()).toString().trim().isEmpty() ?
                         webView.getTitle() : textInput.getText().toString().trim());
                 // Create the icon for the shortcut
@@ -419,10 +493,6 @@ public class MainActivity extends AppCompatActivity {
                         .setIntent(pinShortcutIntent)
                         .build();
                 ShortcutManagerCompat.requestPinShortcut(MainActivity.this, shortcutInfo, null);
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-                    Snackbar.make(coordinatorLayout, R.string.shortcut_added, Snackbar.LENGTH_SHORT)
-                            .show();
-                }
             }
         });
         // Cancel creating shortcut
@@ -456,16 +526,70 @@ public class MainActivity extends AppCompatActivity {
         shortcutIcon = IconCompat.createWithAdaptiveBitmap(icon);
     }
 
-    // Check if there is a default app to open the current link
-    private void checkDefaultApps() {
-        String packageName = "de.badener.companion_browser";
-        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(webView.getUrl()));
-        PackageManager packageManager = getPackageManager();
-        List<ResolveInfo> list = packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
-        for (ResolveInfo info : list) {
-            packageName = info.activityInfo.packageName;
-        }
-        isDefaultAppAvailable = !packageName.equals("de.badener.companion_browser");
+    // Save night mode preference and apply new theme
+    private void setNightModePreference() {
+        editor = sharedPreferences.edit();
+        editor.putInt("night_mode", nightModePreference);
+        editor.apply();
+        recreate();
+    }
+
+    // Set custom start page
+    private void setStartPage() {
+        MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(this);
+        builder.setIcon(R.drawable.ic_home_edit_outline);
+        builder.setTitle(R.string.action_set_start_page);
+        View viewInflated = LayoutInflater.from(this).inflate(R.layout.alert_dialog_text_input_layout, null);
+        final TextInputLayout textInputLayout = viewInflated.findViewById(R.id.alertDialogTextInputLayout);
+        textInputLayout.setHint(getString(R.string.set_start_page_hint));
+        final TextInputEditText textInput = viewInflated.findViewById(R.id.alertDialogTextInput);
+        textInput.setText(startPage);
+        builder.setView(viewInflated);
+
+        // Get custom URL from text input and save it
+        builder.setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialogInterface, int i) {
+                startPage = (Objects.requireNonNull(textInput.getText()).toString().trim().isEmpty() ?
+                        startPage : textInput.getText().toString().trim());
+                editor = sharedPreferences.edit();
+                editor.putString("start_page", startPage);
+                editor.apply();
+                webView.loadUrl(startPage);
+                Snackbar.make(coordinatorLayout, R.string.start_page_saved, Snackbar.LENGTH_SHORT).show();
+            }
+        });
+        // Cancel
+        builder.setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
+            public void onClick(DialogInterface dialogInterface, int i) {
+                dialogInterface.dismiss();
+            }
+        });
+        builder.show();
+    }
+
+    // Clear browsing data
+    private void clearBrowsingData() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.action_clear_data)
+                .setIcon(R.drawable.ic_delete_outline)
+                .setMessage(R.string.clear_data_message)
+                .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        webView.clearCache(true);
+                        CookieManager.getInstance().removeAllCookies(null);
+                        WebStorage.getInstance().deleteAllData();
+                        webView.loadUrl(startPage);
+                        Snackbar.make(coordinatorLayout, R.string.clear_data_confirmation, Snackbar.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton(android.R.string.cancel, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialogInterface, int i) {
+                        dialogInterface.dismiss();
+                    }
+                })
+                .show();
     }
 
     // Restore fullscreen after losing and gaining focus
@@ -484,21 +608,6 @@ public class MainActivity extends AppCompatActivity {
                         | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                         | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                         | View.SYSTEM_UI_FLAG_FULLSCREEN);
-    }
-
-    // Check if permission is granted to write on storage for downloading files
-    private boolean isStoragePermissionGranted() {
-        if (ContextCompat.checkSelfPermission(this,
-                android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
-            // Permission is granted
-            return true;
-        } else {
-            // Ask for permission because it is not granted yet
-            Snackbar.make(coordinatorLayout, R.string.storage_permission_needed, Snackbar.LENGTH_SHORT)
-                    .show();
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
-            return false;
-        }
     }
 
     // Prevent the back button from closing the app
